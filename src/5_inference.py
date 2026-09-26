@@ -38,11 +38,27 @@ def inference():
     # Filter only highly confident matches
     high_conf = df[df['pred_prob'] > STRICT_THRESHOLD].copy()
     
-    # Sort by probability descending just for neatness
-    high_conf = high_conf.sort_values(['source1_entity_id', 'pred_prob'], ascending=[True, False])
+    # Global One-to-One Resolution (The Fix!)
+    # Since S1 is a deduplicated master list, an S2/S3 candidate can only belong to ONE S1 entity.
+    print("Applying global one-to-one resolution to eliminate systematic false positives...")
+    best_for_candidate = {}  # candidate_id -> (s1_id, score)
     
-    # Group back into a dictionary of lists (No dropping duplicates across sources)
-    matches = high_conf.groupby('source1_entity_id')['candidate_entity_id'].apply(list).to_dict()
+    # We iterate over rows as tuples for speed
+    for row in high_conf.itertuples(index=False):
+        s1_id = row.source1_entity_id
+        cand_id = row.candidate_entity_id
+        score = row.pred_prob
+        
+        current = best_for_candidate.get(cand_id)
+        if current is None or score > current[1]:
+            best_for_candidate[cand_id] = (s1_id, score)
+
+    # Rebuild the S1 -> [candidates] mapping using only winning assignments
+    matches_dict = defaultdict(list)
+    for cand_id, (s1_id, score) in best_for_candidate.items():
+        matches_dict[s1_id].append(cand_id)
+        
+    matches = dict(matches_dict)
     
     # Load test S1 to ensure ALL S1 entities are in the output (even singletons)
     s1_test = pd.read_csv(os.path.join(test_clean, 'test_source1.csv'), dtype=str)
