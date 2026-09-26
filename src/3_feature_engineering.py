@@ -90,8 +90,8 @@ def build_features(stage='train'):
         final_df = final_df.merge(gt, on=['source1_entity_id', 'candidate_entity_id'], how='left')
         final_df['label'] = final_df['label'].fillna(0).astype(int)
         
-    print(f"Saving features for {stage} (Ultra-Fast Parquet)...")
-    final_df.to_parquet(os.path.join(out_dir, f'{stage}_features.parquet'), index=False)
+    print(f"Saving features for {stage}...")
+    final_df.to_csv(os.path.join(out_dir, f'{stage}_features.csv'), index=False)
     print("Done.")
 
 if __name__ == '__main__':
