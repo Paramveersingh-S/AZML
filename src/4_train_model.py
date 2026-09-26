@@ -47,7 +47,8 @@ def train_model():
         'feature_fraction': 0.8,
         'seed': 42,
         'n_jobs': -1,
-        'verbose': -1
+        'verbose': -1,
+        'device': 'gpu'
     }
     
     print("Training LightGBM model...")

@@ -1,18 +1,13 @@
 import pandas as pd
 import numpy as np
 import os
-import glob
-from sklearn.feature_extraction.text import TfidfVectorizer
-import scipy.sparse as sp
+import faiss
+from sentence_transformers import SentenceTransformer
 from tqdm import tqdm
-import pickle
 
-from sklearn.feature_extraction.text import TfidfVectorizer
-import scipy.sparse as sp
-
-def run_sparse_blocking(s1_df, target_df, s1_prefix, target_prefix, country, out_file, K=15):
+def run_embedding_blocking(s1_df, target_df, s1_prefix, target_prefix, country, out_file, K=15):
     """
-    Computes matches using TF-IDF and Sparse Matrix Batch Multiplication to avoid OOM while achieving high recall.
+    Computes matches using Semantic Embeddings and FAISS GPU for blazing fast, high-recall retrieval.
     """
     print(f"[{country}] Blocking {s1_prefix} vs {target_prefix}")
     print(f"  S1 Size: {len(s1_df)}, Target Size: {len(target_df)}")
@@ -22,67 +17,47 @@ def run_sparse_blocking(s1_df, target_df, s1_prefix, target_prefix, country, out
         
     print("  Extracting combined text features...")
     # Fill NAs and convert to strings
-    s1_text = s1_df['business_name_clean'].fillna('') + ' ' + s1_df['business_address_clean'].fillna('')
-    target_text = target_df['business_name_clean'].fillna('') + ' ' + target_df['business_address_clean'].fillna('')
+    s1_text = (s1_df['business_name_clean'].fillna('') + ' ' + s1_df['business_address_clean'].fillna('')).tolist()
+    target_text = (target_df['business_name_clean'].fillna('') + ' ' + target_df['business_address_clean'].fillna('')).tolist()
     
-    print("  Fitting TF-IDF Vectorizer (char_wb ngrams)...")
-    # Character n-grams are robust to typos and missing spaces
-    vectorizer = TfidfVectorizer(analyzer='char_wb', ngram_range=(2, 4), min_df=2, max_df=0.5)
+    print("  Loading Sentence Transformer (GPU)...")
+    model = SentenceTransformer('all-MiniLM-L6-v2', device='cuda')
     
-    # Fit on target text to build the vocabulary
-    vectorizer.fit(pd.concat([s1_text, target_text]))
+    print("  Encoding Target texts...")
+    target_embeddings = model.encode(target_text, batch_size=1024, show_progress_bar=True, normalize_embeddings=True)
     
-    print("  Transforming to Sparse Matrices...")
-    S1_tfidf = vectorizer.transform(s1_text)
-    Target_tfidf = vectorizer.transform(target_text)
+    print("  Encoding S1 texts...")
+    s1_embeddings = model.encode(s1_text, batch_size=1024, show_progress_bar=True, normalize_embeddings=True)
     
-    Target_tfidf_T = Target_tfidf.T.tocsr()
+    print("  Building FAISS GPU Index...")
+    d = target_embeddings.shape[1]
+    res = faiss.StandardGpuResources()
+    index_flat = faiss.IndexFlatIP(d) # Inner product = Cosine similarity for normalized vectors
+    gpu_index = faiss.index_cpu_to_gpu(res, 0, index_flat)
+    
+    gpu_index.add(target_embeddings)
     
     s1_ids = s1_df['entity_id'].values
     target_ids = target_df['entity_id'].values
     
-    print("  Performing Batch Sparse Matrix Multiplication...")
+    print(f"  Searching top {K} matches on GPU...")
     batch_size = 2000
-    N = S1_tfidf.shape[0]
     
     with open(out_file, 'w', encoding='utf-8') as f:
         f.write('source1_entity_id,candidate_entity_ids\n')
         
-        for start_row in tqdm(range(0, N, batch_size)):
-            end_row = min(start_row + batch_size, N)
+        for i in tqdm(range(0, len(s1_embeddings), batch_size)):
+            chunk = s1_embeddings[i:i+batch_size]
+            distances, indices = gpu_index.search(chunk, K)
             
-            chunk = S1_tfidf[start_row:end_row]
-            # Matrix multiplication
-            C_chunk = chunk.dot(Target_tfidf_T)
-            
-            for i in range(C_chunk.shape[0]):
-                s1_idx = start_row + i
-                s1_id = s1_ids[s1_idx]
-                
-                row = C_chunk.getrow(i)
-                data = row.data
-                indices = row.indices
-                
-                if len(data) == 0:
-                    f.write(f"{s1_id},\n")
-                    continue
-                
-                if len(data) > K:
-                    # Get top K indices
-                    top_k_idx = np.argpartition(data, -K)[-K:]
-                    # Sort them by score
-                    sort_idx = top_k_idx[np.argsort(data[top_k_idx])[::-1]]
-                    best_indices = indices[sort_idx]
-                else:
-                    sort_idx = np.argsort(data)[::-1]
-                    best_indices = indices[sort_idx]
-                    
-                cands = target_ids[best_indices]
+            for j in range(len(chunk)):
+                s1_id = s1_ids[i+j]
+                cands = target_ids[indices[j]]
                 f.write(f"{s1_id},{','.join(cands)}\n")
 
 
 def process_blocking(stage='train'):
-    base_dir = '../../dataset/student_resource/dataset'
+    base_dir = '../dataset/student_resource/dataset'
     clean_dir = os.path.join(base_dir, f'{stage}_clean')
     out_dir = 'output'
     os.makedirs(out_dir, exist_ok=True)
@@ -104,11 +79,11 @@ def process_blocking(stage='train'):
         
         # Block S1 vs S2
         out_s2 = os.path.join(out_dir, f'{stage}_s2_candidates_{c_safe}.csv')
-        run_sparse_blocking(s1_c, s2_c, 'S1', 'S2', c, out_s2, K=15)
+        run_embedding_blocking(s1_c, s2_c, 'S1', 'S2', c, out_s2, K=15)
         
         # Block S1 vs S3
         out_s3 = os.path.join(out_dir, f'{stage}_s3_candidates_{c_safe}.csv')
-        run_sparse_blocking(s1_c, s3_c, 'S1', 'S3', c, out_s3, K=15)
+        run_embedding_blocking(s1_c, s3_c, 'S1', 'S3', c, out_s3, K=15)
 
     print(f"Blocking completed for {stage}!")
 
