@@ -3,7 +3,7 @@ import numpy as np
 import os
 import time
 from sklearn.feature_extraction.text import TfidfVectorizer
-from sklearn.neighbors import NearestNeighbors
+from tqdm import tqdm
 
 def run_tfidf_blocking(s1_df, target_df, s1_name, target_name, country, out_file, K=15):
     print(f"[{country}] Blocking {s1_name} vs {target_name}")
@@ -13,8 +13,7 @@ def run_tfidf_blocking(s1_df, target_df, s1_name, target_name, country, out_file
     s1_text = (s1_df['business_name_clean'].fillna('') + ' ' + s1_df['business_address_clean'].fillna('')).values
     target_text = (target_df['business_name_clean'].fillna('') + ' ' + target_df['business_address_clean'].fillna('')).values
     
-    print("  Fitting TF-IDF Vectorizer (this is character-aware and handles typos!)...")
-    # max_df=0.05 guarantees we drop hyper-common n-grams which cause 100% density and OOMs.
+    print("  Fitting TF-IDF Vectorizer...")
     vec = TfidfVectorizer(analyzer='char_wb', ngram_range=(2, 4), min_df=2, max_df=0.05)
     
     t0 = time.time()
@@ -25,21 +24,16 @@ def run_tfidf_blocking(s1_df, target_df, s1_name, target_name, country, out_file
     S1_tfidf = vec.transform(s1_text)
     print(f"  S1 TF-IDF Shape: {S1_tfidf.shape}, Time: {time.time()-t0:.2f}s")
     
-    print("  Building Sparse NearestNeighbors Index (Multi-threaded C++)...")
-    t0 = time.time()
-    # brute algorithm natively handles sparse matrices extremely well with cosine metric
-    nn = NearestNeighbors(n_neighbors=K, metric='cosine', algorithm='brute', n_jobs=-1)
-    nn.fit(Target_tfidf)
-    print(f"  Index Build Time: {time.time()-t0:.2f}s")
+    print("  Transposing Target for Pure Sparse Dot Product...")
+    Target_tfidf_T = Target_tfidf.T.tocsr()
     
     s1_ids = s1_df['entity_id'].values
     target_ids = target_df['entity_id'].values
     
-    # Process in larger chunks to exploit parallel CPU cores but avoid RAM spikes
-    batch_size = 50000
+    batch_size = 5000
     N = S1_tfidf.shape[0]
     
-    print("  Searching Nearest Neighbors...")
+    print(f"  Searching in ultra-fast chunks of {batch_size}...")
     with open(out_file, 'w', encoding='utf-8') as f:
         f.write("source1_entity_id," + ",".join([f"candidate_{i+1}" for i in range(K)]) + "\n")
         
@@ -48,15 +42,33 @@ def run_tfidf_blocking(s1_df, target_df, s1_name, target_name, country, out_file
             end_row = min(start_row + batch_size, N)
             chunk = S1_tfidf[start_row:end_row]
             
-            # This is automatically multi-threaded
-            distances, indices = nn.kneighbors(chunk)
+            # 1. Ultra-fast Sparse-Sparse Matrix Multiplication (Returns Sparse Matrix, bypassing RAM issue)
+            res_sparse = chunk.dot(Target_tfidf_T)
             
-            # Write to file
+            # 2. Fast Top-K directly from the CSR internal data arrays
+            indptr = res_sparse.indptr
+            indices = res_sparse.indices
+            data = res_sparse.data
+            
             for i in range(end_row - start_row):
+                start = indptr[i]
+                end = indptr[i+1]
+                row_data = data[start:end]
+                row_indices = indices[start:end]
+                
+                if len(row_data) > K:
+                    top_inds = np.argpartition(row_data, -K)[-K:]
+                    # Sort by similarity descending
+                    sorted_top_inds = top_inds[np.argsort(row_data[top_inds])[::-1]]
+                    top_cols = row_indices[sorted_top_inds]
+                else:
+                    sorted_inds = np.argsort(row_data)[::-1]
+                    top_cols = row_indices[sorted_inds]
+                
                 s1_id = s1_ids[start_row + i]
-                cands = target_ids[indices[i]]
+                cands = target_ids[top_cols]
                 f.write(f"{s1_id},{','.join(cands)}\n")
-            
+                
             print(f"    Processed {end_row}/{N} | Chunk Time: {time.time()-t_chunk:.2f}s")
 
 def process_blocking(stage='train'):
