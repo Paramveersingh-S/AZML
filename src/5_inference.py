@@ -32,7 +32,7 @@ def inference():
     df['is_match'] = (preds > threshold).astype(int)
     
     # CHEAT CODE: Strict Threshold and Top-1 Precision Lock
-    STRICT_THRESHOLD = 0.90
+    STRICT_THRESHOLD = threshold # Use the mathematically best threshold found during training
     print(f"Applying strict Precision Lock with threshold: {STRICT_THRESHOLD}")
     
     # Filter only highly confident matches
