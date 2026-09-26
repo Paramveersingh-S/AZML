@@ -20,7 +20,7 @@ def inference():
     print(f"Loaded Model. Best threshold from training: {threshold}")
     
     print("Loading test features...")
-    df = pd.read_csv(os.path.join(base_dir, 'test_features.csv'))
+    df = pd.read_parquet(os.path.join(base_dir, 'test_features.parquet'))
     
     features = ['name_lev', 'name_jaro', 'name_token_sort', 'name_token_set', 'name_partial', 'addr_lev', 'addr_token_set', 'addr_missing']
     X_test = df[features]

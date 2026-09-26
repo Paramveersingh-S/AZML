@@ -12,7 +12,7 @@ def f05_score(y_true, y_pred):
 def train_model():
     base_dir = 'output'
     print("Loading features...")
-    df = pd.read_csv(os.path.join(base_dir, 'train_features.csv'))
+    df = pd.read_parquet(os.path.join(base_dir, 'train_features.parquet'))
     
     # Define features
     features = ['name_lev', 'name_jaro', 'name_token_sort', 'name_token_set', 'name_partial', 'addr_lev', 'addr_token_set', 'addr_missing']
