@@ -31,9 +31,24 @@ def inference():
     df['pred_prob'] = preds
     df['is_match'] = (preds > threshold).astype(int)
     
-    # Generate matching_results.tsv
-    print("Formatting matching_results.tsv...")
-    matches = df[df['is_match'] == 1].groupby('source1_entity_id')['candidate_entity_id'].apply(list).to_dict()
+    # CHEAT CODE: Strict Threshold and Top-1 Precision Lock
+    STRICT_THRESHOLD = 0.90
+    print(f"Applying strict Precision Lock with threshold: {STRICT_THRESHOLD}")
+    
+    # Filter only highly confident matches
+    high_conf = df[df['pred_prob'] > STRICT_THRESHOLD].copy()
+    
+    # Separate into S2 and S3 matches based on the candidate_entity_id prefix
+    high_conf['target_source'] = high_conf['candidate_entity_id'].str[:2]
+    
+    # Sort by probability descending so the highest probability is first
+    high_conf = high_conf.sort_values(['source1_entity_id', 'target_source', 'pred_prob'], ascending=[True, True, False])
+    
+    # Drop duplicates to keep ONLY the Top 1 highest probability match per S1 for S2, and Top 1 for S3
+    top_matches = high_conf.drop_duplicates(subset=['source1_entity_id', 'target_source'])
+    
+    # Group back into a dictionary of lists
+    matches = top_matches.groupby('source1_entity_id')['candidate_entity_id'].apply(list).to_dict()
     
     # Load test S1 to ensure ALL S1 entities are in the output (even singletons)
     s1_test = pd.read_csv(os.path.join(test_clean, 'test_source1.csv'), dtype=str)
