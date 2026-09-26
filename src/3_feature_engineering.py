@@ -54,6 +54,11 @@ def build_features(stage='train'):
     pairs = pairs.merge(s1, on='source1_entity_id', how='left')
     pairs = pairs.merge(target_dict, on='candidate_entity_id', how='left')
     
+    # FREE RAM
+    del s1, target_dict, s2, s3
+    import gc
+    gc.collect()
+    
     # Vectorized computation using list comprehensions
     s1_names = pairs['s1_name'].fillna('').astype(str).tolist()
     s1_addrs = pairs['s1_addr'].fillna('').astype(str).tolist()
@@ -77,6 +82,11 @@ def build_features(stage='train'):
     pairs['addr_missing'] = [1.0 if not b else 0.0 for b in t_addrs]
     
     final_df = pairs
+    
+    # FREE 20GB OF RAM! The python lists of 124M strings are destroying the memory.
+    del s1_names, s1_addrs, t_names, t_addrs
+    import gc
+    gc.collect()
     
     # Labels
     if stage == 'train':
