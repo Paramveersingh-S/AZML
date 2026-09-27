@@ -27,42 +27,34 @@ def inference():
     
     print("Running Inference...")
     preds = model.predict(X_test, num_iteration=model.best_iteration)
-    
     df['pred_prob'] = preds
-    df['is_match'] = (preds > threshold).astype(int)
     
-    # Remove Top-1 Lock since entities can have 4+ legitimate matches
-    STRICT_THRESHOLD = threshold 
-    print(f"Applying strict threshold: {STRICT_THRESHOLD}")
+    # -----------------------------------------------------------------------
+    # CRITICAL FIX: The README states S1 may match MANY S2/S3 records.
+    # The "global one-to-one" constraint was WRONG and was throwing away
+    # true positives. We simply apply the threshold per pair.
+    # F0.5 is precision-heavy so we use the model-tuned threshold.
+    # -----------------------------------------------------------------------
+    print(f"Applying threshold: {threshold:.4f}")
+    matched = df[df['pred_prob'] > threshold][['source1_entity_id', 'candidate_entity_id', 'pred_prob']].copy()
     
-    # Filter only highly confident matches
-    high_conf = df[df['pred_prob'] > STRICT_THRESHOLD].copy()
-    
-    # Global One-to-One Resolution (The Fix!)
-    # Since S1 is a deduplicated master list, an S2/S3 candidate can only belong to ONE S1 entity.
-    print("Applying global one-to-one resolution to eliminate systematic false positives...")
-    best_for_candidate = {}  # candidate_id -> (s1_id, score)
-    
-    # We iterate over rows as tuples for speed
-    for row in high_conf.itertuples(index=False):
-        s1_id = row.source1_entity_id
-        cand_id = row.candidate_entity_id
-        score = row.pred_prob
-        
-        current = best_for_candidate.get(cand_id)
-        if current is None or score > current[1]:
-            best_for_candidate[cand_id] = (s1_id, score)
-
-    # Rebuild the S1 -> [candidates] mapping using only winning assignments
+    # Build S1 -> [matches] dict
     matches_dict = defaultdict(list)
-    for cand_id, (s1_id, score) in best_for_candidate.items():
-        matches_dict[s1_id].append(cand_id)
-        
-    matches = dict(matches_dict)
+    for row in matched.itertuples(index=False):
+        matches_dict[row.source1_entity_id].append(row.candidate_entity_id)
     
-    # Load test S1 to ensure ALL S1 entities are in the output (even singletons)
+    # Deduplicate within each S1's match list
+    for k in matches_dict:
+        matches_dict[k] = list(set(matches_dict[k]))
+    
+    # Load ALL test S1 entities — every one MUST appear in output (even singletons)
     s1_test = pd.read_csv(os.path.join(test_clean, 'test_source1.csv'), dtype=str)
     s1_ids = s1_test['entity_id'].values
+    
+    print(f"Total S1 entities in test: {len(s1_ids)}")
+    matched_count = sum(1 for s1_id in s1_ids if s1_id in matches_dict)
+    print(f"S1 entities with at least 1 match: {matched_count}")
+    print(f"Singletons (no match predicted): {len(s1_ids) - matched_count}")
     
     final_output_dir = 'output/final'
     os.makedirs(final_output_dir, exist_ok=True)
@@ -71,14 +63,14 @@ def inference():
     with open(matching_file, 'w', encoding='utf-8') as f:
         f.write('source1_entity_id\tmatched_entity_ids\n')
         for s1_id in s1_ids:
-            if s1_id in matches:
-                # Remove duplicates if any just in case
-                unique_matches = list(set(matches[s1_id]))
-                f.write(f"{s1_id}\t{','.join(unique_matches)}\n")
+            if s1_id in matches_dict:
+                f.write(f"{s1_id}\t{','.join(matches_dict[s1_id])}\n")
             else:
                 f.write(f"{s1_id}\t\n")
                 
-    # Generate candidate_pairs.tsv
+    print(f"Saved matching_results.tsv ({len(s1_ids)} rows)")
+    
+    # Generate candidate_pairs.tsv from blocking output
     print("Formatting candidate_pairs.tsv...")
     cand_files = glob.glob(os.path.join(base_dir, 'test_*_candidates_*.csv'))
     
@@ -86,14 +78,12 @@ def inference():
     for cf in cand_files:
         with open(cf, 'r', encoding='utf-8', errors='replace') as file:
             lines = file.read().split('\n')
-            if len(lines) > 0:
-                # skip header, usually first line
-                for line in lines[1:]:
-                    parts = line.strip('\n').split(',')
-                    if len(parts) > 1:
-                        s1_id = parts[0]
-                        cands = [c for c in parts[1:] if c]
-                        cand_dict[s1_id].update(cands)
+            for line in lines[1:]:
+                parts = line.strip('\n').split(',')
+                if len(parts) > 1:
+                    s1_id = parts[0]
+                    cands = [c for c in parts[1:] if c]
+                    cand_dict[s1_id].update(cands)
             
     candidate_file = os.path.join(final_output_dir, 'candidate_pairs.tsv')
     with open(candidate_file, 'w', encoding='utf-8') as f:
@@ -104,8 +94,8 @@ def inference():
             else:
                 f.write(f"{s1_id}\t\n")
                 
-    print("Outputs generated successfully in d:/Projects/AZML/output/")
-    print("You should now run: python utils/validate_submission.py --matching output/matching_results.tsv --candidate output/candidate_pairs.tsv")
+    print("Outputs generated in output/final/")
+    print("Now run: python utils/validate_submission.py --matching output/final/matching_results.tsv --candidate output/final/candidate_pairs.tsv --test-dir dataset/test")
 
 if __name__ == '__main__':
     inference()

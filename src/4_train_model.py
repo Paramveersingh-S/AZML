@@ -5,9 +5,47 @@ import os
 import pickle
 from sklearn.model_selection import GroupKFold
 from sklearn.metrics import precision_score, recall_score, fbeta_score
+from collections import defaultdict
 
 def f05_score(y_true, y_pred):
     return fbeta_score(y_true, y_pred, beta=0.5)
+
+def entity_level_f05(val_df, preds, threshold, gt):
+    """
+    Compute EXACT competition metric: macro-averaged F0.5 per S1 entity.
+    This is what the leaderboard actually measures.
+    """
+    val_df = val_df.copy()
+    val_df['pred_prob'] = preds
+    matched = val_df[val_df['pred_prob'] > threshold][['source1_entity_id', 'candidate_entity_id']]
+    
+    pred_dict = defaultdict(set)
+    for row in matched.itertuples(index=False):
+        pred_dict[row.source1_entity_id].add(row.candidate_entity_id)
+    
+    # All S1 entities in val set
+    all_s1 = val_df['source1_entity_id'].unique()
+    
+    scores = []
+    for s1_id in all_s1:
+        true_set = gt.get(s1_id, set())
+        pred_set = pred_dict.get(s1_id, set())
+        
+        if len(true_set) == 0 and len(pred_set) == 0:
+            scores.append(1.0)  # Correct singleton prediction
+        elif len(pred_set) == 0:
+            scores.append(0.0)  # Missed all true matches
+        else:
+            tp = len(true_set & pred_set)
+            prec = tp / len(pred_set) if pred_set else 0.0
+            rec = tp / len(true_set) if true_set else 0.0
+            if prec + rec == 0:
+                scores.append(0.0)
+            else:
+                f05 = (1.25 * prec * rec) / (0.25 * prec + rec)
+                scores.append(f05)
+    
+    return np.mean(scores)
 
 def train_model():
     base_dir = 'output'
@@ -65,20 +103,31 @@ def train_model():
     print("Predicting on validation set...")
     preds = model.predict(X_val, num_iteration=model.best_iteration)
     
-    # Tune threshold for F_0.5
+    # -----------------------------------------------------------------------
+    # CRITICAL: Tune threshold on ENTITY-LEVEL macro F0.5
+    # This is the EXACT metric used by the leaderboard — not pair-level F0.5!
+    # -----------------------------------------------------------------------
+    print("Building ground truth dict for entity-level scoring...")
+    val_df = df.iloc[val_idx][['source1_entity_id', 'candidate_entity_id', 'label']].copy()
+    
+    # Build true match sets per S1 entity
+    gt_dict = defaultdict(set)
+    for row in val_df[val_df['label'] == 1].itertuples(index=False):
+        gt_dict[row.source1_entity_id].add(row.candidate_entity_id)
+    gt_dict = dict(gt_dict)
+    
     best_threshold = 0.5
     best_f05 = 0.0
     
-    print("Tuning threshold for F_0.5...")
-    for t in np.arange(0.1, 0.9, 0.02):
-        y_pred = (preds > t).astype(int)
-        f05 = f05_score(y_val, y_pred)
+    print("Tuning threshold on ENTITY-LEVEL macro F0.5 (exact competition metric)...")
+    for t in np.arange(0.1, 0.95, 0.01):
+        f05 = entity_level_f05(val_df, preds, t, gt_dict)
         if f05 > best_f05:
             best_f05 = f05
             best_threshold = t
             
     print(f"Best Threshold: {best_threshold:.3f}")
-    print(f"Validation F0.5 Score: {best_f05:.4f}")
+    print(f"Validation Entity-Level Macro F0.5: {best_f05:.4f}")
     
     # Save model and threshold
     model_path = os.path.join(base_dir, 'lgb_model.pkl')
